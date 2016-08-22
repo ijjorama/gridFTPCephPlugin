@@ -616,6 +616,37 @@ int ceph_handle_open(char *path,
   return (rc);
 }
 
+unsigned long calculateChecksum(
+  globus_l_gfs_ceph_handle_t *ceph_handle, 
+  checksum_block_list_t** checksum_array, 
+  globus_off_t chkOffset,
+  unsigned long in_checksum) {
+
+  unsigned long file_checksum = in_checksum;
+  int i;
+
+  /* go over all received chunks */
+  for (i = 1; i < ceph_handle->number_of_blocks; i++) {
+    /* check the continuity with previous chunk */
+    if (checksum_array[i]->offset != chkOffset) {
+      // not continuous, either a chunk is missing or we have overlapping chunks
+      if (checksum_array[i]->offset > chkOffset) {
+        // a chunk is missing, consider it full of 0s
+        globus_off_t doff = checksum_array[i]->offset - chkOffset;
+        file_checksum = adler32_combine_(file_checksum, adler32_0chunks(doff), doff);
+        chkOffset = checksum_array[i]->offset;
+      } else {
+        // overlapping chunks. This is not supported, fail the transfer
+
+        return 0;
+      }
+    }
+    /* now handle the next chunk */
+    file_checksum = adler32_combine_(file_checksum, checksum_array[i]->csumvalue, checksum_array[i]->size);
+    chkOffset += checksum_array[i]->size;
+  }
+  return file_checksum;
+}
 /* receive from client */
 static void globus_l_gfs_file_net_read_cb(globus_gfs_operation_t op,
                                           globus_result_t result,
@@ -706,11 +737,16 @@ static void globus_l_gfs_file_net_read_cb(globus_gfs_operation_t op,
     }
 
     globus_free(buffer);
+    
     /* if not done just register the next one */
-    if (!ceph_handle->done) globus_l_gfs_ceph_read_from_net(ceph_handle);
-    /* if done and there are no outstanding callbacks finish */
-    else if(ceph_handle->outstanding == 0) {
-      if (ceph_handle->number_of_blocks > 0) {
+    if (!ceph_handle->done) {
+      
+      globus_l_gfs_ceph_read_from_net(ceph_handle);
+      
+    } else {
+      
+      /* if done and there are no outstanding callbacks finish */
+      if (ceph_handle->outstanding == 0 && ceph_handle->number_of_blocks > 0) { 
         /* checksum calculation */
         checksum_array=(checksum_block_list_t**)
           globus_calloc(ceph_handle->number_of_blocks,sizeof(checksum_block_list_t*));
@@ -744,36 +780,27 @@ static void globus_l_gfs_file_net_read_cb(globus_gfs_operation_t op,
           file_checksum = checksum_array[0]->csumvalue;
         }
         chkOffset += checksum_array[0]->size;
-        /* go over all received chunks */
-        for (i = 1; i < ceph_handle->number_of_blocks; i++) {
-          /* check the continuity with previous chunk */
-          if (checksum_array[i]->offset != chkOffset) {
-            // not continuous, either a chunk is missing or we have overlapping chunks
-            if (checksum_array[i]->offset > chkOffset) {
-              // a chunk is missing, consider it full of 0s
-              globus_off_t doff = checksum_array[i]->offset - chkOffset;
-              file_checksum = adler32_combine_(file_checksum, adler32_0chunks(doff), doff);
-              chkOffset = checksum_array[i]->offset;
-            } else {
-              // overlapping chunks. This is not supported, fail the transfer
-              free_checksum_list(ceph_handle->checksum_list);
-              globus_gfs_log_message(GLOBUS_GFS_LOG_ERR,"%s: Overlapping chunks detected while handling 0x%x-0x%x. The overlap starts at 0x%x\n",
-                                     func,
-                                     checksum_array[i]->offset,
-                                     checksum_array[i]->offset+checksum_array[i]->size,
-                                     chkOffset);
-              globus_ceph_close(func, ceph_handle, "overlapping chunks detected when computing checksum");
-              globus_mutex_unlock(&ceph_handle->mutex);
-              globus_gridftp_server_finished_transfer(op, ceph_handle->cached_res);
-              return;
-            }
-          }
-          /* now handle the next chunk */
-          file_checksum=adler32_combine_(file_checksum,
-                                         checksum_array[i]->csumvalue,
-                                         checksum_array[i]->size);
-          chkOffset += checksum_array[i]->size;
+        
+        /*
+         * Calculate checksum for all the received blocks
+         */
+        file_checksum = calculateChecksum(ceph_handle, checksum_array, chkOffset, file_checksum);
+        
+        if (file_checksum == 0) {
+          
+          free_checksum_list(ceph_handle->checksum_list);
+          globus_gfs_log_message(GLOBUS_GFS_LOG_ERR,"%s: Overlapping chunks detected while handling 0x%x-0x%x. The overlap starts at 0x%x\n",
+                                 func,
+                                 checksum_array[i]->offset,
+                                 checksum_array[i]->offset+checksum_array[i]->size,
+                                 chkOffset);
+          globus_ceph_close(func, ceph_handle, "overlapping chunks detected when computing checksum");
+          globus_mutex_unlock(&ceph_handle->mutex);
+          globus_gridftp_server_finished_transfer(op, ceph_handle->cached_res);
+          return;    
+              
         }
+
         sprintf(ckSumbuf, "%lx", file_checksum);
         globus_gfs_log_message(GLOBUS_GFS_LOG_INFO, "%s: checksum for fd %d : AD 0x%lx\n",
                                func,ceph_handle->fd, file_checksum);
