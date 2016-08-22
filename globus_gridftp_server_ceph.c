@@ -22,7 +22,7 @@
 #include <limits.h>
 #include <stdlib.h>
 
-#include "globus_gridftp_server.h"
+//#include "globus_gridftp_server.h"
 
 #include "dsi_ceph.h"
 #include "ceph_posix.h"
@@ -926,9 +926,10 @@ static void globus_l_gfs_ceph_recv(globus_gfs_operation_t op,
   char *                 pathname;
   int                 flags;
   const char * operation = "STOR";
- 
+  
   GlobusGFSName(globus_l_gfs_ceph_recv);
   ceph_handle = (globus_l_gfs_ceph_handle_t *) user_arg;
+
   
   char* pathname_to_test = remove_prefix(transfer_info->pathname, "/");
 
